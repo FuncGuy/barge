@@ -1,20 +1,29 @@
 package com.trustiv.barge;
 
-import com.zaxxer.hikari.util.ConcurrentBag;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+
 //import com.zaxxer.hikari.util.IBagStateListener;
 //import com.zaxxer.hikari.util.IConcurrentBagEntry;
 import org.apache.commons.math3.stat.descriptive.rank.Percentile;
 import org.apache.commons.math3.stat.inference.KolmogorovSmirnovTest;
 //import com.zaxxer.hikari.util.Java8ConcurrentBag;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
+import com.zaxxer.hikari.util.ConcurrentBag;
 
 public class Barge {
-    public static final int ITERATIONS = 200000;
+    public static final int ITERATIONS = 500_000;
     public static final int WORKERS = 2; // Running on an 8 core machine, so shouldn't need to be pre-empted
+
+    public static final CyclicBarrier barrier = new CyclicBarrier(WORKERS + 1);
+
     public static void main(String[] args) throws Exception {
         final Timestamper ts = new FairLockTimestamper();
         //final Timestamper ts = new AtomicLongTimestamper();
@@ -24,13 +33,21 @@ public class Barge {
         //final BlockingQueue<ManagableAsset> queue = new ArrayBlockingQueue<>(1, true);
         //final BlockingQueue<ManagableAsset> queue = new ReallyUnfairQueue<>();
 
-        List<Worker> workers = new ArrayList<>(WORKERS);
-        for (int i = 0; i < WORKERS; i++) workers.add(new Worker(ts, bag));
-        //for (int i = 0; i < WORKERS; i++) workers.add(new Worker(ts, queue));
-        for (Worker worker: workers) worker.start();
-
         bag.add(new ManagableAsset()); // Single asset
         //queue.put(new ManagableAsset());
+        
+        List<Worker> workers = new ArrayList<>(WORKERS);
+        for (int i = 0; i < WORKERS; i++) {
+        	workers.add(new Worker(ts, bag));
+        }
+
+        //for (int i = 0; i < WORKERS; i++) workers.add(new Worker(ts, queue));
+        for (Worker worker: workers) {
+        	worker.start();
+        }
+
+        TimeUnit.SECONDS.sleep(1);
+        barrier.await();
 
         for (Worker worker: workers) worker.join();
 
@@ -96,7 +113,6 @@ public class Barge {
         private final Timestamper ts;
         //private final BlockingQueue<ManagableAsset> queue;
         private final ConcurrentBag<ManagableAsset> bag;
-        private int wasteTimeSource = 0;
 
         private Worker(Timestamper ts, ConcurrentBag<ManagableAsset> bag) {
         //private Worker(Timestamper ts, BlockingQueue<ManagableAsset> queue) {
@@ -107,30 +123,31 @@ public class Barge {
 
         @Override
         public void run() {
-            for (int i = 0; i < ITERATIONS; i++) {
-                startTimestamps[i] = ts.getTs();
-                try {
-                    ManagableAsset asset = bag.borrow(100, TimeUnit.MILLISECONDS);
-                    //ManagableAsset asset = queue.poll(100, TimeUnit.MILLISECONDS);
-                    while (asset == null) {
-                        System.out.println(Thread.currentThread() + " starved for 100ms");
-                        asset = bag.borrow(100, TimeUnit.MILLISECONDS);
-                        //asset = queue.poll(100, TimeUnit.MILLISECONDS);
-                    }
-                    endTimestamps[i] = ts.getTs();
-                    wasteTime(2000);
-                    bag.requite(asset);
-                    //queue.put(asset);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
+        	try {
+	        	barrier.await();
 
-            }
+	            for (int i = 0; i < ITERATIONS; i++) {
+	                startTimestamps[i] = ts.getTs();
+	                ManagableAsset asset = bag.borrow(100, TimeUnit.MILLISECONDS);
+	                //ManagableAsset asset = queue.poll(100, TimeUnit.MILLISECONDS);
+	                while (asset == null) {
+	                    System.out.println(Thread.currentThread() + " starved for 100ms");
+	                    asset = bag.borrow(100, TimeUnit.MILLISECONDS);
+	                    //asset = queue.poll(100, TimeUnit.MILLISECONDS);
+	                }
+	                endTimestamps[i] = ts.getTs();
+	                wasteTime(TimeUnit.MICROSECONDS.toNanos(100));
+	                bag.requite(asset);
+	            }
+        	} catch (InterruptedException | BrokenBarrierException e) {
+        		//queue.put(asset);
+        		e.printStackTrace();
+        	}
         }
 
-        private void wasteTime(int iterations) {
-            for (int i = 0; i < iterations; i++)
-                wasteTimeSource = wasteTimeSource * 768756959 + 21524963;
+        @SuppressWarnings("restriction")
+		private void wasteTime(long wasteNs) {
+        	UnsafeHelper.getUnsafe().park(true, wasteNs);
         }
     }
 
@@ -152,6 +169,11 @@ public class Barge {
         public boolean compareAndSet(int expectedState, int newState) {
             return state.compareAndSet(expectedState, newState);
         }
+
+		@Override
+		public void lazySet(int arg0) {
+			state.lazySet(arg0);
+		}
     }
 
     public static final class DummyListener implements ConcurrentBag.IBagStateListener {
