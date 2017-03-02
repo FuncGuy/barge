@@ -8,7 +8,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 
 //import com.zaxxer.hikari.util.IBagStateListener;
 //import com.zaxxer.hikari.util.IConcurrentBagEntry;
@@ -152,34 +152,41 @@ public class Barge {
     }
 
     public static final class ManagableAsset implements ConcurrentBag.IConcurrentBagEntry {
-        private final AtomicInteger state = new AtomicInteger(0);
+    	private static final AtomicIntegerFieldUpdater<ManagableAsset> stateUpdater;
 
-        public int getState() {
-            return state.get();
-        }
+    	@SuppressWarnings("unused")
+		private volatile int state = 0;
 
-        public AtomicInteger state() {
-            return state;
-        }
+    	static {
+	      stateUpdater = AtomicIntegerFieldUpdater.newUpdater(ManagableAsset.class, "state");
+	   }
 
-        public boolean compareAndSetState(int expectedState, int newState) {
-            return state.compareAndSet(expectedState, newState);
-        }
+	   /** {@inheritDoc} */
+	   @Override
+	   public int getState()
+	   {
+	      return stateUpdater.get(this);
+	   }
 
-        public boolean compareAndSet(int expectedState, int newState) {
-            return state.compareAndSet(expectedState, newState);
-        }
+	   /** {@inheritDoc} */
+	   @Override
+	   public boolean compareAndSet(int expect, int update)
+	   {
+	      return stateUpdater.compareAndSet(this, expect, update);
+	   }
 
-		@Override
-		public void lazySet(int arg0) {
-			state.lazySet(arg0);
-		}
+	   /** {@inheritDoc} */
+	   @Override
+	   public void setState(int update)
+	   {
+	      stateUpdater.set(this, update);
+	   }
     }
 
     public static final class DummyListener implements ConcurrentBag.IBagStateListener {
 
         @Override
-        public Future<Boolean> addBagItem() {
+        public Future<Boolean> addBagItem(int waiting) {
             return new Future<Boolean>() {
 
                 @Override
